@@ -84,10 +84,12 @@ history for Assist-exposed entities, without granting device control or
 administrator tools. Selecting a satellite trusts the endpoint, not the speaker.
 See [voice satellite history](docs/usage.md#voice-satellite-history).
 
-**MCP servers available to Copilot** is empty by default. It lets conversations
-and AI Tasks use tools from servers that you set up with Home Assistant's
+**MCP servers available to Copilot** is empty by default. It lets Home Assistant
+administrators use tools from servers that you set up with Home Assistant's
 [Model Context Protocol](https://www.home-assistant.io/integrations/mcp/)
-integration. Only tools that the server marks as read-only are used, unless you
+integration. These tools are not limited to Assist-exposed entities. Separate
+options, off by default, allow other signed-in users and selected voice
+satellites. Only tools that the server marks as read-only are used, unless you
 also select the server under **MCP servers allowed to use write tools**. See
 [remote MCP tools](docs/usage.md#remote-mcp-tools).
 

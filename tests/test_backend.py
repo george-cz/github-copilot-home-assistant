@@ -4223,6 +4223,17 @@ def select_mcp(setup, *servers, write=()):
         mcp_write_servers=list(write),
         mcp_server_entries={server: f"entry-{server}" for server in servers},
     )
+    if not hasattr(setup.backend.hass, "auth"):
+        set_caller(setup, is_admin=True)
+
+
+def set_caller(setup, *, is_admin, is_active=True):
+    """Make the test request's signed-in user an administrator or not."""
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(
+            return_value=SimpleNamespace(is_admin=is_admin, is_active=is_active)
+        )
+    )
 
 
 def register_apis(setup, monkeypatch, *apis):
@@ -4624,4 +4635,142 @@ async def test_mcp_remote_error_field_does_not_mark_success_as_failure(
     assert payload == (
         {"error": "mcp_tool_error", "result": data} if failed else {"result": data}
     )
+    await assert_clean(setup)
+
+
+def satellite_request(satellite_id="assist_satellite.kitchen"):
+    return SimpleNamespace(
+        text="Turn on the porch light.",
+        satellite_id=satellite_id,
+        as_llm_context=lambda _domain: SimpleNamespace(
+            context=SimpleNamespace(user_id=None)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("caller", "options", "allowed", "guidance"),
+    [
+        ("admin", {}, True, None),
+        ("user", {}, False, "not enabled for this Home Assistant user"),
+        ("user", {"mcp_allow_users": True}, True, None),
+        ("satellite", {}, False, "does not have access to remote MCP tools"),
+        ("satellite", {"mcp_satellites": ["reg-kitchen"]}, True, None),
+        ("unknown_satellite", {"mcp_satellites": ["reg-kitchen"]}, False, None),
+        ("satellite", {"mcp_allow_users": True}, False, None),
+    ],
+)
+async def test_mcp_tools_require_an_eligible_caller(
+    setup, monkeypatch, caller, options, allowed, guidance
+):
+    notes = mcp_api(tools=[mcp_tool("read", read_only=True)])
+    register_apis(setup, monkeypatch, notes)
+    set_caller(setup, is_admin=caller == "admin")
+    select_mcp(setup, "mcp-notes")
+    setup.entry.options.update(options)
+    mcp_module = sys.modules["custom_components.github_copilot.mcp_tools"]
+    monkeypatch.setattr(
+        mcp_module,
+        "satellite_registry_id",
+        lambda hass, satellite_id: (
+            "reg-kitchen" if satellite_id == "assist_satellite.kitchen" else None
+        ),
+    )
+    user = (
+        satellite_request()
+        if caller == "satellite"
+        else satellite_request("assist_satellite.unknown")
+        if caller == "unknown_satellite"
+        else setup.user
+    )
+
+    observed, _ = await call_tools(
+        setup, [], lambda: setup.backend.async_handle_message("agent", user, setup.chat)
+    )
+
+    assert any(tool.name.startswith("mcp_") for tool in observed) is allowed
+    prompt = json.dumps(setup.client.create_session.await_args.kwargs["system_message"])
+    assert ("Remote MCP servers: enabled; unavailable for this request" in prompt) is (
+        not allowed
+    )
+    if guidance:
+        assert guidance in prompt
+    if not allowed:
+        notes.instance.async_call_tool.assert_not_awaited()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("satellites", [[], ["reg-kitchen"]])
+async def test_ai_tasks_without_a_user_never_get_mcp_tools(
+    setup, monkeypatch, satellites
+):
+    notes = mcp_api(tools=[mcp_tool("read", read_only=True)])
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes")
+    setup.entry.options.update(mcp_allow_users=True, mcp_satellites=satellites)
+    request = setup.module.DataTaskRequest(
+        text="Summarize the notes.", context=SimpleNamespace(context=None)
+    )
+    observed, _ = await call_tools(
+        setup,
+        [],
+        lambda: setup.backend.async_generate_data("task", request, ChatLog()),
+    )
+
+    assert not any(tool.name.startswith("mcp_") for tool in observed)
+    # Denial is fixed capability text; the task's own instructions are unchanged.
+    assert setup.session.send_and_wait.await_args.args[0] == "Summarize the notes."
+    identity = setup.client.create_session.await_args.kwargs["system_message"][
+        "sections"
+    ]["identity"]["content"]
+    assert identity.endswith(
+        "Remote MCP tools are not available to this task, "
+        "because it has no signed-in Home Assistant user or the user lacks access."
+    )
+    await assert_clean(setup)
+
+
+async def test_mcp_caller_access_is_rechecked_for_each_call(setup, monkeypatch):
+    notes = mcp_api(
+        tools=[mcp_tool("first", read_only=True), mcp_tool("second", read_only=True)]
+    )
+    register_apis(setup, monkeypatch, notes)
+    set_caller(setup, is_admin=False)
+    select_mcp(setup, "mcp-notes")
+    setup.entry.options["mcp_allow_users"] = True
+
+    async def call_tool(tool_input):
+        # The owner turns off non-admin access during the turn.
+        setup.entry.options = {**setup.entry.options, "mcp_allow_users": False}
+        return SimpleNamespace(data={"ok": True}, error=False)
+
+    notes.instance.async_call_tool.side_effect = call_tool
+    _, results = await call_tools(
+        setup, [("first", {}), ("second", {})], lambda: turn(setup)
+    )
+
+    second = json.loads(results["second"].text_result_for_llm.split("\n\n", 1)[1])
+    assert (
+        second["error_text"] == "Remote MCP tools are not available for this request."
+    )
+    assert notes.instance.async_call_tool.await_count == 1
+    await assert_clean(setup)
+
+
+async def test_unavailable_mcp_server_adds_a_short_notice(setup, monkeypatch):
+    notes = mcp_api(tools=[mcp_tool("read", read_only=True)])
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes", "mcp-offline")
+
+    await call_tools(setup, [], lambda: turn(setup))
+
+    kwargs = setup.session.send_and_wait.await_args.kwargs
+    prompt = setup.session.send_and_wait.await_args.args[0]
+    assert prompt == (
+        "Home Assistant integration notice: 1 selected MCP server(s) are "
+        "unavailable right now. If the request needs them, say so briefly, without "
+        "technical details.\n\nActual request:\nHello"
+    )
+    assert "mcp-offline" not in prompt
+    assert kwargs["display_prompt"] == "Hello"
     await assert_clean(setup)

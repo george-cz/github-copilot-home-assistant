@@ -50,6 +50,8 @@ from .const import (
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_ENABLE_HOME_ASSISTANT_API,
     CONF_ENABLE_SHARED_MEMORY,
+    CONF_MCP_ALLOW_USERS,
+    CONF_MCP_SATELLITES,
     CONF_MCP_SERVER_ENTRIES,
     CONF_MCP_SERVERS,
     CONF_MCP_WRITE_SERVERS,
@@ -610,6 +612,27 @@ def _options_schema(
                     options=mcp_options, multiple=True, custom_value=False
                 )
             )
+        fields[
+            vol.Required(
+                CONF_MCP_ALLOW_USERS,
+                default=bool(options.get(CONF_MCP_ALLOW_USERS, False)),
+            )
+        ] = BooleanSelector()
+        mcp_satellites = selected_satellite_entity_ids(
+            hass, list(options.get(CONF_MCP_SATELLITES) or [])
+        )
+        fields[
+            vol.Optional(
+                CONF_MCP_SATELLITES,
+                **(
+                    {"description": {"suggested_value": mcp_satellites}}
+                    if mcp_satellites
+                    else {"default": []}
+                ),
+            )
+        ] = EntitySelector(
+            EntitySelectorConfig(domain="assist_satellite", multiple=True)
+        )
     fields[
         vol.Optional(
             CONF_PROMPT,
@@ -714,7 +737,15 @@ def _apply_mcp_options(
         )
         if entry_id is not None:
             entries[server] = entry_id
-    for key in (CONF_MCP_SERVERS, CONF_MCP_WRITE_SERVERS, CONF_MCP_SERVER_ENTRIES):
+    allow_users = bool(user_input.get(CONF_MCP_ALLOW_USERS, False))
+    satellites = _satellite_registry_ids(hass, user_input.get(CONF_MCP_SATELLITES, []))
+    for key in (
+        CONF_MCP_SERVERS,
+        CONF_MCP_WRITE_SERVERS,
+        CONF_MCP_SERVER_ENTRIES,
+        CONF_MCP_ALLOW_USERS,
+        CONF_MCP_SATELLITES,
+    ):
         options.pop(key, None)
     if servers:
         options[CONF_MCP_SERVERS] = servers
@@ -722,6 +753,10 @@ def _apply_mcp_options(
         options[CONF_MCP_WRITE_SERVERS] = writable
     if entries:
         options[CONF_MCP_SERVER_ENTRIES] = entries
+    if servers and allow_users:
+        options[CONF_MCP_ALLOW_USERS] = True
+    if servers and satellites:
+        options[CONF_MCP_SATELLITES] = satellites
 
 
 def _satellite_registry_ids(hass: Any, entity_ids: Any) -> list[str]:

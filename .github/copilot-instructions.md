@@ -79,6 +79,10 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py  # cached SDK runtim
     enabled `assist_satellite` that is in options or allowed by allow-all mode.
     Exposure checks use the `conversation` assistant namespace.
   - AI Tasks never receive memory or satellite-history tools.
+  - Remote MCP tools: administrators always; non-admin users only with
+    `mcp_allow_users`; no-user conversations only from an enabled, registered
+    satellite in `mcp_satellites`; no-user AI Tasks never. Recheck the caller,
+    the server selection, and its write grant on every call.
   - Never call exposure helpers on arbitrary model-supplied entity IDs.
 - **Trusted prompt channel:** Only fixed integration text, capability state,
   and the owner's literal Additional instructions enter system instructions.

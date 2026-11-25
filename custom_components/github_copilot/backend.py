@@ -84,6 +84,7 @@ from .const import (
     ISSUE_TASK_MODEL_UNAVAILABLE,
     MAX_ACTIVE_SESSIONS,
     MAX_CONCURRENT_TURNS,
+    MCP_TASK_DENIED_PROMPT,
     MEMORY_FORGET_TOOL,
     MEMORY_LIST_TOOL,
     MEMORY_MAX_FACTS,
@@ -118,9 +119,13 @@ from .llm_api import (
     selected_llm_apis,
 )
 from .mcp_tools import (
+    MCP_ALLOWED,
+    McpMissing,
     McpToolBinding,
     async_call_mcp_tool,
     async_mcp_bindings,
+    async_mcp_caller_status,
+    mcp_request_notice,
     mcp_tools_deferred,
     selected_mcp_servers,
 )
@@ -597,10 +602,29 @@ class ConversationBackend:
         history_enabled = not is_task and history_status == "available"
         history_budget = HistoryTurnBudget()
         satellite_id = None if is_task else getattr(user_input, "satellite_id", None)
-        mcp_tools = await async_mcp_bindings(
-            self.hass, self.entry.options, context, self._mcp_warned_tools
+
+        async def mcp_status_now() -> str:
+            return await async_mcp_caller_status(
+                self.hass,
+                self.entry.options,
+                context,
+                satellite_id=satellite_id,
+                is_task=is_task,
+            )
+
+        async def mcp_caller_allowed() -> bool:
+            return await mcp_status_now() == MCP_ALLOWED
+
+        mcp_status = await mcp_status_now()
+        mcp_tools, mcp_missing = (
+            await async_mcp_bindings(
+                self.hass, self.entry.options, context, self._mcp_warned_tools
+            )
+            if mcp_status == MCP_ALLOWED
+            else ([], McpMissing())
         )
         mcp_by_name = {binding.sdk_name: binding for binding in mcp_tools}
+        mcp_notice = mcp_request_notice(mcp_missing)
 
         async def require_active_admin() -> None:
             await async_require_admin(self.hass, context.context)
@@ -617,6 +641,7 @@ class ConversationBackend:
             admin_api_active,
             satellite_id=satellite_id,
             history_access=history_enabled,
+            mcp_status=mcp_status,
         )
         if self._memory_enabled and not is_task:
             session_key += ":shared-memory"
@@ -631,6 +656,7 @@ class ConversationBackend:
                 admin_notice,
                 history_status,
                 mcp_tools,
+                mcp_status,
             ) as record,
             record.lock,
         ):
@@ -820,6 +846,7 @@ class ConversationBackend:
                                 mcp_binding,
                                 arguments,
                                 ha_tool_input.id,
+                                mcp_caller_allowed,
                             )
                         elif is_history:
                             if not history_enabled:
@@ -926,6 +953,15 @@ class ConversationBackend:
                     != "available"
                 ):
                     raise HomeAssistantError("Satellite history access changed.")
+                if mcp_tools and not await mcp_caller_allowed():
+                    raise HomeAssistantError("Remote MCP tool access changed.")
+                if mcp_notice:
+                    # Fixed integration text with counts only, never server data.
+                    prompt = f"{mcp_notice}\n\n" + (
+                        prompt
+                        if prompt != user_input.text
+                        else f"Actual request:\n{prompt}"
+                    )
                 send_started = True
                 return await record.session.send_and_wait(
                     prompt,
@@ -1092,10 +1128,17 @@ class ConversationBackend:
         admin_notice: str | None,
         history_status: str | None = None,
         mcp_tools: list[McpToolBinding] | None = None,
+        mcp_status: str | None = None,
     ):
         if not isinstance(request, DataTaskRequest):
             yield await self._async_get_session(
-                key, api, instructions, admin_notice, history_status, mcp_tools
+                key,
+                api,
+                instructions,
+                admin_notice,
+                history_status,
+                mcp_tools,
+                mcp_status,
             )
             return
         image_request = request if isinstance(request, ImageTaskRequest) else None
@@ -1108,6 +1151,7 @@ class ConversationBackend:
                 task_mode=True,
                 image_request=image_request,
                 task_request=request,
+                mcp_status=mcp_status,
             )
         except Exception as err:
             await self._async_raise_if_authentication_error(err)
@@ -1391,6 +1435,7 @@ class ConversationBackend:
         admin_notice: str | None,
         history_status: str | None,
         mcp_tools: list[McpToolBinding] | None = None,
+        mcp_status: str | None = None,
     ) -> _SessionRecord:
         """Reuse an active session or create a bounded new one."""
         async with self._session_lock:
@@ -1439,6 +1484,7 @@ class ConversationBackend:
                     prompt_context,
                     admin_notice=admin_notice,
                     history_status=history_status,
+                    mcp_status=mcp_status,
                 )
             except Exception as err:
                 model_id = await self._async_recover_model(model_id, err)
@@ -1449,6 +1495,7 @@ class ConversationBackend:
                         prompt_context,
                         admin_notice=admin_notice,
                         history_status=history_status,
+                        mcp_status=mcp_status,
                     )
                 except Exception as retry_err:
                     self._raise_sdk_error(model_id, retry_err)
@@ -1591,6 +1638,7 @@ class ConversationBackend:
         *,
         admin_notice: str | None = None,
         history_status: str | None = None,
+        mcp_status: str | None = None,
         task_mode: bool = False,
         image_request: ImageTaskRequest | None = None,
         task_request: DataTaskRequest | None = None,
@@ -1641,9 +1689,14 @@ class ConversationBackend:
                         "identity": {
                             "action": "replace",
                             "content": AI_TASK_SYSTEM_PROMPT
+                            + (
+                                MCP_TASK_DENIED_PROMPT
+                                if mcp_status not in (None, "disabled", MCP_ALLOWED)
+                                else ""
+                            )
                             if task_mode
                             else self._conversation_system_prompt(
-                                admin_notice, history_status
+                                admin_notice, history_status, mcp_status
                             ),
                         },
                     },
@@ -1973,6 +2026,7 @@ class ConversationBackend:
         *,
         satellite_id: str | None = None,
         history_access: bool = False,
+        mcp_status: str | None = None,
     ) -> str:
         """Hash conversation and HA identity without persisting user identifiers."""
         if not conversation_id:
@@ -1985,6 +2039,7 @@ class ConversationBackend:
                 str(satellite_id or ""),
                 str(history_access),
                 str(admin_api_active),
+                str(mcp_status or ""),
             )
         )
         return hashlib.sha256(identity.encode()).hexdigest()
@@ -1994,7 +2049,10 @@ class ConversationBackend:
         return self.entry.options.get(CONF_PROMPT) or ""
 
     def _conversation_system_prompt(
-        self, admin_notice: str | None, history_status: str | None = None
+        self,
+        admin_notice: str | None,
+        history_status: str | None = None,
+        mcp_status: str | None = None,
     ) -> str:
         """Explain configured capabilities without granting access to their tools."""
         admin_state = (
@@ -2024,9 +2082,11 @@ class ConversationBackend:
                     else "disabled"
                 ),
                 mcp_servers=(
-                    "enabled"
-                    if selected_mcp_servers(self.entry.options)
-                    else "disabled"
+                    "disabled"
+                    if not selected_mcp_servers(self.entry.options)
+                    else "enabled"
+                    if mcp_status in (None, MCP_ALLOWED)
+                    else "enabled; unavailable for this request"
                 ),
             ),
         ]
@@ -2064,6 +2124,27 @@ class ConversationBackend:
         }
         if history_status in history_guidance:
             parts.append(history_guidance[history_status])
+        mcp_guidance = {
+            "user_not_allowed": (
+                "Remote MCP tools are not enabled for this Home Assistant user. If "
+                "the request needs them, say so briefly."
+            ),
+            "satellite_not_allowed": (
+                "This Assist satellite does not have access to remote MCP tools. "
+                "If the request needs them, say they are not enabled for this "
+                "device. Do not suggest signing in to the satellite."
+            ),
+            "unrecognized_satellite": (
+                "This request has no signed-in user and no recognized Assist "
+                "satellite, so no remote MCP tools are provided."
+            ),
+            "request_context_unavailable": (
+                "This request has no verified caller, so no remote MCP tools are "
+                "provided."
+            ),
+        }
+        if mcp_status in mcp_guidance:
+            parts.append(mcp_guidance[mcp_status])
         if self._memory_enabled:
             parts.append(MEMORY_POLICY)
         return "\n\n".join(parts)

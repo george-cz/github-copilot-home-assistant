@@ -1137,8 +1137,12 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
             assistant="conversation",
             device_id=None,
         )
-        bindings = await async_mcp_bindings(hass, options, context)
+        bindings, _ = await async_mcp_bindings(hass, options, context)
         assert [binding.tool.name for binding in bindings] == ["search"]
+
+        async def allowed():
+            return True
+
         schema = convert_tool_schema(
             bindings[0].tool.parameters,
             custom_serializer=bindings[0].instance.custom_serializer,
@@ -1147,7 +1151,7 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
         assert schema["required"] == ["query"]
 
         result = await async_call_mcp_tool(
-            hass, lambda: options, bindings[0], {"query": "milk"}, "call"
+            hass, lambda: options, bindings[0], {"query": "milk"}, "call", allowed
         )
         assert calls == [("search", {"query": "milk"})]
         assert result["content"][0]["text"] == "hit"
@@ -1157,7 +1161,7 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
         responses.append({"content": [], "isError": True, "error": "e" * 20_000})
         result = await asyncio.wait_for(
             async_call_mcp_tool(
-                hass, lambda: options, bindings[0], {"query": "milk"}, "call"
+                hass, lambda: options, bindings[0], {"query": "milk"}, "call", allowed
             ),
             5,
         )
@@ -1166,12 +1170,75 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
 
         responses.append({"content": [], "isError": False, "error": "remote"})
         result = await async_call_mcp_tool(
-            hass, lambda: options, bindings[0], {"query": "milk"}, "call"
+            hass, lambda: options, bindings[0], {"query": "milk"}, "call", allowed
         )
         assert "error" not in result
 
         options["mcp_write_servers"] = ["mcp-notes"]
-        bindings = await async_mcp_bindings(hass, options, context)
+        bindings, _ = await async_mcp_bindings(hass, options, context)
         assert {binding.tool.name for binding in bindings} == {"search", "delete"}
+    finally:
+        await hass.async_stop()
+
+
+async def test_real_mcp_caller_status_uses_auth_users_and_satellite_registry(
+    tmp_path,
+):
+    from homeassistant.auth import auth_manager_from_config
+    from homeassistant.core import Context, HomeAssistant
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.github_copilot.mcp_tools import (
+        MCP_ALLOWED,
+        async_mcp_caller_status,
+    )
+
+    hass = HomeAssistant(str(tmp_path))
+    try:
+        hass.config_entries = SimpleNamespace(async_wait_initialized=AsyncMock())
+        dr.async_setup(hass)
+        await dr.async_load(hass, load_empty=True)
+        await er.async_load(hass, load_empty=True)
+        hass.auth = await auth_manager_from_config(hass, [], [])
+        # The first user is the owner, which HA cannot deactivate.
+        await hass.auth.async_create_user("Owner", group_ids=["system-admin"])
+        admin = await hass.auth.async_create_user("Admin", group_ids=["system-admin"])
+        member = await hass.auth.async_create_user("Member", group_ids=["system-users"])
+        registry = er.async_get(hass)
+        kitchen = registry.async_get_or_create(
+            "assist_satellite", "test", "kitchen", suggested_object_id="kitchen"
+        )
+        disabled = registry.async_get_or_create(
+            "assist_satellite",
+            "test",
+            "garage",
+            suggested_object_id="garage",
+            disabled_by=er.RegistryEntryDisabler.USER,
+        )
+        options = {
+            "mcp_servers": ["mcp-notes"],
+            "mcp_satellites": [kitchen.id, disabled.id],
+        }
+
+        async def status(user_id, satellite_id=None, *, is_task=False, **extra):
+            return await async_mcp_caller_status(
+                hass,
+                {**options, **extra},
+                SimpleNamespace(context=Context(user_id=user_id)),
+                satellite_id=satellite_id,
+                is_task=is_task,
+            )
+
+        assert await status(admin.id) == MCP_ALLOWED
+        assert await status(member.id) == "user_not_allowed"
+        assert await status(member.id, mcp_allow_users=True) == MCP_ALLOWED
+        assert await status(None, kitchen.entity_id) == MCP_ALLOWED
+        assert await status(None, disabled.entity_id) == "unrecognized_satellite"
+        assert await status(None, kitchen.entity_id, is_task=True) == (
+            "task_without_user"
+        )
+        await hass.auth.async_update_user(admin, is_active=False)
+        assert await status(admin.id) == "request_context_unavailable"
     finally:
         await hass.async_stop()
