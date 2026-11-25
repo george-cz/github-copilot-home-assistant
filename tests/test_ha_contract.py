@@ -1068,12 +1068,18 @@ async def test_real_flows_use_multiline_additional_instructions(tmp_path):
     )
     from custom_components.github_copilot.const import DOMAIN
 
+    saved = "Line one.\nLine two."
+    submitted = "Keep replies short.\n\n- Use Celsius.\n  Indented line.\n"
     models = [SimpleNamespace(id="gpt-4.1")]
     hass = HomeAssistant(str(tmp_path))
+    updates = []
+    hass.config_entries = SimpleNamespace(
+        async_update_entry=lambda entry, **changes: updates.append(changes)
+    )
     entry = SimpleNamespace(
         entry_id="entry",
         data={},
-        options={"model": "gpt-4.1", CONF_PROMPT: "Line one.\nLine two."},
+        options={"model": "gpt-4.1", CONF_PROMPT: saved},
     )
     hass.data[DOMAIN] = {
         entry.entry_id: SimpleNamespace(
@@ -1082,8 +1088,10 @@ async def test_real_flows_use_multiline_additional_instructions(tmp_path):
     }
     setup_flow = GitHubCopilotConfigFlow()
     setup_flow._models = models
+    setup_flow._credentials = {"access_token": "not-used"}
     options_flow = GitHubCopilotOptionsFlow(entry)
     try:
+        results = []
         for flow, step in (
             (setup_flow, setup_flow.async_step_model),
             (options_flow, options_flow.async_step_init),
@@ -1091,7 +1099,7 @@ async def test_real_flows_use_multiline_additional_instructions(tmp_path):
             flow.hass = hass
             flow.handler = DOMAIN
             flow.flow_id = "flow"
-            flow.context = {}
+            flow.context = {"source": "user"}
             form = await step()
             key, selector = next(
                 (key, value)
@@ -1099,7 +1107,16 @@ async def test_real_flows_use_multiline_additional_instructions(tmp_path):
                 if key == CONF_PROMPT
             )
             assert selector.serialize()["selector"]["text"]["multiline"] is True
-            assert selector("Line one.\nLine two.") == "Line one.\nLine two."
-        assert key.description["suggested_value"] == "Line one.\nLine two."
+            # Submit through the flow's own schema, then check what it stores.
+            user_input = form["data_schema"](
+                {"model": "gpt-4.1", CONF_PROMPT: submitted}
+            )
+            results.append(await step(user_input))
+        assert key.description["suggested_value"] == saved
+        created, updated = results
+        assert created["type"] == "create_entry"
+        assert created["options"][CONF_PROMPT] == submitted
+        assert updated["type"] == "create_entry"
+        assert updated["data"][CONF_PROMPT] == submitted
     finally:
         await hass.async_stop()
