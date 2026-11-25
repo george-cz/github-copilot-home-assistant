@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +14,8 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import llm
 
 from .const import (
+    CONF_MCP_ALLOW_USERS,
+    CONF_MCP_SATELLITES,
     CONF_MCP_SERVER_ENTRIES,
     CONF_MCP_SERVERS,
     CONF_MCP_WRITE_SERVERS,
@@ -26,6 +28,7 @@ from .const import (
     MCP_MAX_SCHEMA_BYTES,
     MCP_MAX_TOOLS,
 )
+from .history import satellite_registry_id
 from .schema import convert_tool_schema
 
 if TYPE_CHECKING:
@@ -36,6 +39,8 @@ MCP_API_MODULE = "homeassistant.components.mcp"
 MCP_API_CLASS = "ModelContextProtocolAPI"
 SERVER_DISABLED = "This MCP server is disabled for this agent."
 SERVER_UNAVAILABLE = "This MCP server is unavailable in Home Assistant."
+CALLER_NOT_ALLOWED = "Remote MCP tools are not available for this request."
+MCP_ALLOWED = "allowed"
 WRITE_DISABLED = "Write tools are disabled for this MCP server."
 CALL_FAILED = "The MCP server could not complete this request."
 REAUTH_REQUIRED = "The MCP server needs to be signed in again in Home Assistant."
@@ -45,6 +50,14 @@ MAY_HAVE_COMPLETED = (
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_-]")
 _UNSAFE_LABEL = re.compile(r"[^\w -]")
 _MAX_LABEL = 64
+
+
+@dataclass(frozen=True)
+class McpMissing:
+    """Counts of selected servers and tools that this request cannot use."""
+
+    servers: int = 0
+    tools: int = 0
 
 
 @dataclass(frozen=True)
@@ -107,6 +120,68 @@ def mcp_api_granted(api: Any, options: Mapping[str, Any]) -> bool:
     return entry_id is not None and mcp_server_entries(options).get(api.id) == entry_id
 
 
+async def async_mcp_caller_status(
+    hass: HomeAssistant,
+    options: Mapping[str, Any],
+    context: Any,
+    *,
+    satellite_id: str | None = None,
+    is_task: bool = False,
+) -> str:
+    """Decide whether this caller may use MCP tools; `MCP_ALLOWED` grants access.
+
+    Administrators always may. Other signed-in users and no-user requests from
+    selected Assist satellites need their own opt-ins. AI Tasks without a
+    signed-in user never may, so satellite access cannot authorize them.
+    """
+    if not selected_mcp_servers(options):
+        return "disabled"
+    ha_context = getattr(context, "context", None)
+    user_id = getattr(ha_context, "user_id", None)
+    if user_id is not None:
+        user = await hass.auth.async_get_user(user_id)
+        if user is None or not getattr(user, "is_active", True):
+            return "request_context_unavailable"
+        if user.is_admin or options.get(CONF_MCP_ALLOW_USERS, False):
+            return MCP_ALLOWED
+        return "user_not_allowed"
+    if is_task:
+        return "task_without_user"
+    if ha_context is None or not hasattr(ha_context, "user_id"):
+        return "request_context_unavailable"
+    registry_id = satellite_registry_id(hass, satellite_id)
+    if registry_id is None:
+        return "unrecognized_satellite"
+    if registry_id not in set(options.get(CONF_MCP_SATELLITES) or ()):
+        return "satellite_not_allowed"
+    return MCP_ALLOWED
+
+
+def mcp_request_notice(missing: McpMissing) -> str:
+    """Return fixed integration text for this turn; it never names a server.
+
+    Caller denial is capability state, so it goes in the fixed system prompt
+    instead, and requests that do not need MCP are not changed.
+    """
+    parts = []
+    if missing.servers:
+        parts.append(
+            f"{missing.servers} selected MCP server(s) are unavailable right now."
+        )
+    if missing.tools:
+        parts.append(
+            f"{missing.tools} remote MCP tool(s) were skipped because they are "
+            "unsupported or exceed the integration's limits."
+        )
+    if not parts:
+        return ""
+    return (
+        "Home Assistant integration notice: "
+        + " ".join(parts)
+        + " If the request needs them, say so briefly, without technical details."
+    )
+
+
 def selected_mcp_servers(options: Mapping[str, Any]) -> list[str]:
     servers = options.get(CONF_MCP_SERVERS) or []
     return [server for server in servers if isinstance(server, str)]
@@ -161,7 +236,7 @@ async def async_mcp_bindings(
     options: Mapping[str, Any],
     llm_context: Any,
     warned: set[str] | None = None,
-) -> list[McpToolBinding]:
+) -> tuple[list[McpToolBinding], McpMissing]:
     """Collect allowed, size-bounded tools from the selected MCP servers.
 
     `warned` holds tools already reported as skipped, so a persistent server
@@ -169,7 +244,7 @@ async def async_mcp_bindings(
     """
     selected = selected_mcp_servers(options)
     if not selected:
-        return []
+        return [], McpMissing()
     writable = write_mcp_servers(options)
     apis = registered_mcp_apis(hass)
     bindings: list[McpToolBinding] = []
@@ -253,7 +328,7 @@ async def async_mcp_bindings(
             unavailable,
             skipped_write,
         )
-    return bindings
+    return bindings, McpMissing(servers=unavailable, tools=len(rejected))
 
 
 def mcp_tools_deferred(bindings: list[McpToolBinding]) -> bool:
@@ -294,8 +369,11 @@ async def async_call_mcp_tool(
     binding: McpToolBinding,
     arguments: dict[str, Any],
     call_id: str,
+    caller_allowed: Callable[[], Awaitable[bool]],
 ) -> dict[str, Any]:
-    """Recheck the owner's grant, then call the tool on its own server."""
+    """Recheck the caller and the owner's grant, then call the owning server."""
+    if not await caller_allowed():
+        raise HomeAssistantError(CALLER_NOT_ALLOWED)
     options = get_options()
     if binding.api_id not in selected_mcp_servers(options):
         raise HomeAssistantError(SERVER_DISABLED)

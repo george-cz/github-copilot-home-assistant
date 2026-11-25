@@ -41,6 +41,8 @@
           "enable_shared_memory": "Enable shared memory",
           "mcp_servers": "MCP servers available to Copilot",
           "mcp_write_servers": "MCP servers allowed to use write tools",
+          "mcp_allow_users": "Allow other signed-in users to use MCP tools",
+          "mcp_satellites": "Assist satellites allowed to use MCP tools",
           "prompt": "Additional instructions"
         },
         "data_description": {
@@ -52,8 +54,10 @@
           "allowed_satellites": "Choose registered satellite endpoints allowed to read retained state history for any entity currently exposed to Assist. Anyone or any integration that can send a no-user request through a selected endpoint can ask about that history. Newly exposed entities become eligible automatically.",
           "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities.",
-          "mcp_servers": "Servers set up with the Model Context Protocol integration. Conversations from any caller, including Assist satellites without a signed-in user, and AI Tasks can use their read-only tools. Tool descriptions and results come from the remote server and are treated as untrusted data.",
-          "mcp_write_servers": "Also provide tools that a server does not mark as read-only. The server must also be selected above. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee."
+          "mcp_servers": "Servers set up with the Model Context Protocol integration. Their tools are not limited to Assist-exposed entities. Administrators can use their read-only tools; choose below who else can. AI Tasks get them only when started by an allowed signed-in user. Tool descriptions and results come from the remote server and are treated as untrusted data.",
+          "mcp_write_servers": "Also provide tools that a server does not mark as read-only. The server must also be selected above. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee.",
+          "mcp_allow_users": "Home Assistant administrators can always use the selected MCP servers. Turn this on to let signed-in users who are not administrators use them too.",
+          "mcp_satellites": "Lets requests without a signed-in user from these registered satellite endpoints use the selected MCP servers, including write tools you allow. This trusts the endpoint, not the speaker: anyone or any integration able to use it can use these tools. AI Tasks without a signed-in user never get MCP tools."
         }
       }
     },
@@ -96,6 +100,8 @@
           "enable_shared_memory": "Enable shared memory",
           "mcp_servers": "MCP servers available to Copilot",
           "mcp_write_servers": "MCP servers allowed to use write tools",
+          "mcp_allow_users": "Allow other signed-in users to use MCP tools",
+          "mcp_satellites": "Assist satellites allowed to use MCP tools",
           "prompt": "Additional instructions"
         },
         "data_description": {
@@ -107,8 +113,10 @@
           "allowed_satellites": "Choose registered satellite endpoints allowed to read retained state history for any entity currently exposed to Assist. Anyone or any integration that can send a no-user request through a selected endpoint can ask about that history. Newly exposed entities become eligible automatically.",
           "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities.",
-          "mcp_servers": "Servers set up with the Model Context Protocol integration. Conversations from any caller, including Assist satellites without a signed-in user, and AI Tasks can use their read-only tools. Tool descriptions and results come from the remote server and are treated as untrusted data.",
-          "mcp_write_servers": "Also provide tools that a server does not mark as read-only. The server must also be selected above. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee."
+          "mcp_servers": "Servers set up with the Model Context Protocol integration. Their tools are not limited to Assist-exposed entities. Administrators can use their read-only tools; choose below who else can. AI Tasks get them only when started by an allowed signed-in user. Tool descriptions and results come from the remote server and are treated as untrusted data.",
+          "mcp_write_servers": "Also provide tools that a server does not mark as read-only. The server must also be selected above. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee.",
+          "mcp_allow_users": "Home Assistant administrators can always use the selected MCP servers. Turn this on to let signed-in users who are not administrators use them too.",
+          "mcp_satellites": "Lets requests without a signed-in user from these registered satellite endpoints use the selected MCP servers, including write tools you allow. This trusts the endpoint, not the speaker: anyone or any integration able to use it can use these tools. AI Tasks without a signed-in user never get MCP tools."
         }
       }
     },

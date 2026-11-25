@@ -561,3 +561,47 @@ async def test_mcp_selections_survive_redisplay_after_admin_error(
         "enable_home_assistant_api": "home_assistant_api_unavailable",
         "base": "mcp_server_changed",
     }
+
+
+async def test_mcp_caller_options_are_saved_only_with_a_selected_server(
+    options_setup, monkeypatch
+):
+    llm = sys.modules["homeassistant.helpers.llm"]
+    apis = [_mcp_api("mcp-notes", "entry-notes")]
+    monkeypatch.setattr(llm, "async_get_apis", lambda hass: apis, raising=False)
+    module = sys.modules[type(options_setup.flow).__module__]
+    monkeypatch.setattr(
+        module,
+        "_satellite_registry_ids",
+        lambda hass, ids: ["reg-" + item.split(".")[-1] for item in ids or []],
+    )
+    monkeypatch.setattr(
+        module,
+        "selected_satellite_entity_ids",
+        lambda hass, ids: ["assist_satellite." + item[4:] for item in ids],
+    )
+    setup = options_setup
+    form = await setup.flow.async_step_init()
+    submitted = form["data_schema"](
+        {
+            "mcp_servers": ["mcp-notes"],
+            "mcp_allow_users": True,
+            "mcp_satellites": ["assist_satellite.kitchen"],
+        }
+    )
+    result = await setup.flow.async_step_init(submitted)
+    assert result["data"]["mcp_allow_users"] is True
+    assert result["data"]["mcp_satellites"] == ["reg-kitchen"]
+
+    setup.entry.options = result["data"]
+    form = await setup.flow.async_step_init()
+    cleared = form["data_schema"](
+        {
+            "mcp_servers": [],
+            "mcp_allow_users": True,
+            "mcp_satellites": ["assist_satellite.kitchen"],
+        }
+    )
+    result = await setup.flow.async_step_init(cleared)
+    assert "mcp_allow_users" not in result["data"]
+    assert "mcp_satellites" not in result["data"]

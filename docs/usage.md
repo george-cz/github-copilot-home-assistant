@@ -123,16 +123,38 @@ calendar, or search service. To let Copilot use a server's tools:
    A server must also be selected in step 3; otherwise its write permission is
    not saved.
 
+5. Optional: turn on **Allow other signed-in users to use MCP tools**, or select
+   voice satellites in **Assist satellites allowed to use MCP tools**.
+
 Copilot does not get MCP tools automatically, and it does not use HA's other
-LLM API settings for them. The settings apply to conversations from any caller,
-including Assist satellites without a signed-in user, and to AI Tasks.
+LLM API settings for them. MCP tools are **not limited to Assist-exposed
+entities**. A server can reach anything that it is set up to reach, so read the
+server's own setup and security documentation, for example
+[ha-mcp](https://github.com/homeassistant-ai/ha-mcp), before you select it.
+
+Who can use the selected servers:
+
+- **Home Assistant administrators:** always, in conversations and in AI Tasks
+  that they start.
+- **Other signed-in users:** only when **Allow other signed-in users to use MCP
+  tools** is on.
+- **Voice satellites without a signed-in user:** only the satellites selected in
+  **Assist satellites allowed to use MCP tools**. Selecting a satellite trusts
+  the endpoint, not the speaker. Anyone or any integration that can use that
+  satellite can use the tools, including any write tools you allow.
+- **AI Tasks without a signed-in user**, for example from an automation: never.
+
+The integration checks the caller again before each tool call.
 
 By default, Copilot gets only the tools that the server marks as read-only. Write
 tools can change data on the remote service. The read-only label comes from the
 server and is not a guarantee, so select only servers that you trust.
 
 The integration checks the settings again before each tool call. If you remove a
-server or its write permission, or the MCP integration unloads, new calls fail.
+server, its write permission, or the caller's access, or the MCP integration
+unloads, new calls fail. If a selected server is unavailable or some of its
+tools are skipped, Copilot gets a short notice and tells you when it matters for
+your request.
 If you remove a server from the Model Context Protocol integration and add it
 again, select it again in the GitHub Copilot settings. Its earlier permissions
 do not apply to the new entry.

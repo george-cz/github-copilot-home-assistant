@@ -16,8 +16,8 @@ ruff check .
 ruff format --check .
 ```
 
-Install the requirements from HA's `conversation`, `camera`, `image`, and `stream`
-component manifests to run the real HA contracts:
+Install the requirements from HA's `conversation`, `camera`, `image`, `stream`,
+and `mcp` component manifests to run the real HA contracts:
 
 ```sh
 HA_COPILOT_HA_TESTS=1 pytest tests/test_ha_contract.py tests/test_ai_task.py
@@ -36,7 +36,69 @@ fake model, including strict task schema transport and disposable task sessions.
 
 The validation workflow runs unit tests, the real HA contract test, hassfest,
 and HACS validation. HACS validation also requires the GitHub repository to
-have a description, topics, and issues enabled.
+have a description, topics, and issues enabled. Both workflows install and test
+through the shared `.github/actions/ha-tests` action.
+
+### HA release watch
+
+`.github/workflows/ha-release-watch.yml` polls PyPI every six hours and tests
+the latest stable Home Assistant release. It also tests the newest beta or
+release candidate when that beta is for a newer month, such as `2026.12.0b0`
+before 2026.12.0 ships. Older month lines are covered only by the CI matrix.
+A release that already passed on the current default-branch commit is skipped
+unless it has an open failure issue. Run the workflow manually to test one
+exact version or to force a retest. Manual runs on other branches can test changes
+without updating compatibility issues or contacting Copilot.
+
+The watch installs in watch mode, which bypasses the development HA range so
+betas outside the supported range can be tested, and then runs `pip check`. It
+skips ruff because the validation workflow already lints every change. Reproduce
+a watch failure locally in a new Python virtual environment:
+
+```sh
+python .github/scripts/ha_release_watch.py install --mode watch 2026.12.0b0
+HA_COPILOT_HA_TESTS=1 python -m pytest -q -rs
+```
+
+A passing beta never changes the supported range or the CI matrix; widening
+them stays a deliberate change.
+
+Failures open issues labeled `ha-compat`. An issue groups failures by month
+line and failure signature, which is the failing step plus the failing test IDs.
+A later version that fails the same way updates the existing issue. The issue
+closes as fixed when its newest affected version passes, or as superseded when
+a newer version in the same month passes. Issue lookups are bounded; when
+there are too many open `ha-compat` issues to read, reporting stops with an
+error instead of acting on an incomplete list. Each issue body carries a hidden
+state marker that the workflow validates before use; do not edit it by hand.
+
+When the optional `COPILOT_ASSIGN_TOKEN` repository secret is set, the watch
+assigns Copilot cloud agent to new test failures. Install failures, which
+usually mean a dependency conflict, are not assigned. When a later version
+fails the same way while Copilot's pull request is open, the watch comments
+`@copilot` on that pull request once per version. Pending notifications for
+open issues are retried on later report runs, even if the latest release has
+changed; a version does not need to be retested to retry its notification.
+The issue keeps its link to the run that reported the failure; the PR comment
+links to the run that delivered the notification.
+If Copilot's pull request was closed without a fix, the watch opens a new
+issue and assigns it again. Without the secret, or when assignment fails,
+issues still open and assignment retries on the next failing run.
+The watch records which versions were listed at
+assignment time. If GitHub accepts the assignment but the final issue update
+fails, a later failure can still notify Copilot's open PR about a new version.
+If replacing an issue is interrupted, a later matching failure closes the
+stale issue referenced by its replacement.
+
+`GITHUB_TOKEN` cannot assign Copilot, so the secret must be a fine-grained
+personal access token limited to this repository, with read and write access
+to actions, contents, issues, and pull requests, as required by
+[GitHub's Copilot assignment API](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/use-cloud-agent-via-the-api#using-the-issues-api).
+Only the workflow's final Copilot step receives it; jobs that install and run
+tests have read-only repository access. Renew the token before it expires.
+
+GitHub disables scheduled workflows after 60 days without repository activity.
+Re-enable the workflow from the Actions tab if that happens.
 
 ## Versions and authentication
 
@@ -425,7 +487,8 @@ ownership and renames tools differently on 2026.10 (always namespaced by API
 name) and 2026.11 (namespaced by API ID only on collision). Instead, the backend
 gets one `APIInstance` per selected server for each request. It keeps a
 `McpToolBinding` per tool and calls the owning instance with the original tool
-name. Assist and administrator rechecks do not apply to MCP tools.
+name. Assist exposure checks do not apply to MCP tools; caller access is
+rechecked on every call instead.
 
 - Options: `mcp_servers` and `mcp_write_servers` store API IDs, only when not
   empty. Write grants require a selected server. `mcp_server_entries` binds each
@@ -439,8 +502,22 @@ name. Assist and administrator rechecks do not apply to MCP tools.
   changes before Submit, the form is shown again with `mcp_server_changed` and
   nothing is saved. A form shown again after an error keeps the submitted
   selections that still match the recorded entries.
-- Access: any conversation caller and AI Tasks. Tools are exposed only when
-  `annotations.read_only` is true, unless the server has a write grant.
+- Access: `async_mcp_caller_status` decides per request and again before every
+  call. Administrators are always allowed. Other signed-in users need
+  `mcp_allow_users`. A request without a user is allowed only from a registered,
+  enabled `assist_satellite` whose registry ID is in `mcp_satellites` (the same
+  registry check as satellite history). AI Tasks without a user are never
+  allowed, even when satellites are. The status is part of the conversation
+  session key, and the capability prompt reports `unavailable for this request`
+  with fixed guidance. The AI Task caller-context guard also applies when MCP is
+  the only tool set. Tools are exposed only when `annotations.read_only` is
+  true, unless the server has a write grant.
+- Notices: when a selected server is unavailable or tools are skipped, the
+  turn's prompt starts with fixed integration text that has counts only
+  (`mcp_request_notice`), followed by `Actual request:`. Conversations show the
+  user's own text through `display_prompt`. A denied AI Task gets fixed text
+  (`MCP_TASK_DENIED_PROMPT`) in its system prompt instead, so its instructions
+  are unchanged.
 - Every call rechecks the selection, the write grant, the entry binding, and
   that the same API object is still registered. The read-only label of a tool is
   taken once per request. A server can mislabel a tool at any time, so a recheck

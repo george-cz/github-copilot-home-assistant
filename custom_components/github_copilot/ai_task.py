@@ -26,6 +26,7 @@ from .const import (
     NAME,
 )
 from .images import verified_image_runtime
+from .mcp_tools import selected_mcp_servers
 from .runtime import CopilotRuntime
 
 PARALLEL_UPDATES = 0
@@ -117,6 +118,7 @@ class GitHubCopilotAITaskEntity(ai_task.AITaskEntity):
         if (
             self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL)
             or self.entry.options.get(CONF_ENABLE_HOME_ASSISTANT_API)
+            or selected_mcp_servers(self.entry.options)
         ) and (
             session is None
             or session.conversation_id != chat_log.conversation_id

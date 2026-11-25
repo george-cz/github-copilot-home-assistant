@@ -25,10 +25,17 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py  # cached SDK runtim
 
 - Before running real-HA contracts (`HA_COPILOT_HA_TESTS=1`), install the
   requirements declared in the installed HA's `conversation`, `camera`, `image`,
-  `stream`, and `mcp` component manifests. Copy the script from the CI workflow. A
-  green run without the flag can hide skipped contracts.
+  `stream`, and `mcp` component manifests.
+  `python .github/scripts/ha_release_watch.py install <ha-version>` installs
+  them along with the dev dependencies, as CI does. A green run without the
+  flag can hide skipped contracts.
 - CI also runs hassfest, HACS validation, and a check that `version` and the
   `github-copilot-sdk==` pin match between `pyproject.toml` and `manifest.json`.
+- `.github/workflows/ha-release-watch.yml` tests new HA stable releases and
+  monthly betas from PyPI and tracks failures in `ha-compat` issues. For those
+  issues, `install --mode watch <ha-version>` installs a version outside the
+  supported range. Do not widen the supported range or the CI matrix just to
+  make a beta pass. See `docs/development.md`.
 - Use the `ha-verification` skill (`.github/skills/`) for verification and
   compatibility runs. Use `ha-docs-screenshots` to refresh documentation
   screenshots from a disposable real HA instance; never use mockups.
@@ -61,6 +68,9 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py  # cached SDK runtim
 
 ## Key conventions
 
+- **Code review:** Post actionable findings as inline review comments on the
+  relevant changed lines. A summary comment may recap them, but must not replace
+  them.
 - **Permissions are separate opt-ins, rechecked on every tool call.**
   - Device control is limited to Assist-exposed entities.
   - Admin tools require the current caller to be an HA administrator.
@@ -69,6 +79,10 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py  # cached SDK runtim
     enabled `assist_satellite` that is in options or allowed by allow-all mode.
     Exposure checks use the `conversation` assistant namespace.
   - AI Tasks never receive memory or satellite-history tools.
+  - Remote MCP tools: administrators always; non-admin users only with
+    `mcp_allow_users`; no-user conversations only from an enabled, registered
+    satellite in `mcp_satellites`; no-user AI Tasks never. Recheck the caller,
+    the server selection, and its write grant on every call.
   - Never call exposure helpers on arbitrary model-supplied entity IDs.
 - **Trusted prompt channel:** Only fixed integration text, capability state,
   and the owner's literal Additional instructions enter system instructions.

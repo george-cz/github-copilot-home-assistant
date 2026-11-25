@@ -1088,7 +1088,14 @@ async def test_native_large_mcp_tool_sets_load_through_tool_search(
         },
     )
     backend = module.ConversationBackend(
-        SimpleNamespace(data={}),
+        SimpleNamespace(
+            data={},
+            auth=SimpleNamespace(
+                async_get_user=AsyncMock(
+                    return_value=SimpleNamespace(is_admin=True, is_active=True)
+                )
+            ),
+        ),
         entry,
         SimpleNamespace(
             create_session=create_session,
@@ -1125,7 +1132,7 @@ async def test_native_large_mcp_tool_sets_load_through_tool_search(
                 "task",
                 module.DataTaskRequest(
                     text="Create an automation.",
-                    context=SimpleNamespace(context=None),
+                    context=SimpleNamespace(context=SimpleNamespace(user_id="admin")),
                 ),
                 ChatLog(),
             )
@@ -1166,6 +1173,201 @@ async def test_native_large_mcp_tool_sets_load_through_tool_search(
             assert all(
                 mcp_names(request) <= mcp_names(turns[0][0]) for request in turns[2]
             )
+    finally:
+        await backend.async_stop()
+        await client.stop()
+        await runner.cleanup()
+
+
+async def test_native_mcp_denial_and_notice_use_their_own_channels(
+    ha_boundary, tmp_path, monkeypatch
+):
+    """Denial guidance is fixed system text; the notice stays in the user turn."""
+    path = (
+        get_cache_dir(CLI_VERSION)
+        / "prebuilds"
+        / get_runtime_platform()
+        / "copilot-runtime"
+    )
+    if not path.is_file():
+        pytest.skip("Native SDK runtime is not already cached")
+    requests = []
+
+    async def complete(request):
+        requests.append(await request.json())
+        events = [
+            {
+                "id": "test",
+                "object": "chat.completion.chunk",
+                "model": "gpt-4.1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "Done"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "test",
+                "object": "chat.completion.chunk",
+                "model": "gpt-4.1",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        return web.Response(
+            text=body + "data: [DONE]\n\n", content_type="text/event-stream"
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    client = CopilotClient(
+        connection=RuntimeConnection.for_stdio(path=str(path)),
+        use_logged_in_user=False,
+        base_directory=str(tmp_path / "runtime"),
+        mode="empty",
+        log_level="error",
+    )
+    module = ha_boundary.load("backend")
+    mcp_module = __import__(
+        "custom_components.github_copilot.mcp_tools", fromlist=["_"]
+    )
+
+    class ModelContextProtocolAPI:
+        id = "mcp-ha"
+        name = "REMOTE_SERVER_NAME"
+        coordinator = SimpleNamespace(config_entry=SimpleNamespace(entry_id="entry-ha"))
+
+        async def async_get_api_instance(self, llm_context):
+            return SimpleNamespace(
+                tools=[
+                    SimpleNamespace(
+                        name="read",
+                        description="REMOTE_DESCRIPTION",
+                        parameters=vol.Schema({}),
+                        annotations=SimpleNamespace(read_only=True),
+                    )
+                ],
+                custom_serializer=None,
+                async_call_tool=AsyncMock(),
+            )
+
+    ModelContextProtocolAPI.__module__ = "homeassistant.components.mcp"
+    monkeypatch.setattr(
+        module.llm,
+        "async_get_apis",
+        lambda hass: [ModelContextProtocolAPI()],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mcp_module, "satellite_registry_id", lambda hass, satellite_id: "reg-kitchen"
+    )
+    monkeypatch.setattr(
+        module, "satellite_history_status", lambda *args: "satellite_not_allowed"
+    )
+
+    async def create_session(**kwargs):
+        kwargs.pop("github_token")
+        kwargs.pop("github_token_provider")
+        kwargs["provider"] = {
+            "type": "openai",
+            "wire_api": "completions",
+            "base_url": f"http://127.0.0.1:{port}/v1",
+            "api_key": "local-test-not-a-credential",
+        }
+        return await client.create_session(**kwargs)
+
+    backend = module.ConversationBackend(
+        SimpleNamespace(
+            data={},
+            auth=SimpleNamespace(
+                async_get_user=AsyncMock(
+                    return_value=SimpleNamespace(is_admin=True, is_active=True)
+                )
+            ),
+        ),
+        SimpleNamespace(
+            entry_id="entry",
+            data={},
+            options={
+                "model": "gpt-4.1",
+                "mcp_servers": ["mcp-ha", "mcp-offline"],
+                "mcp_server_entries": {
+                    "mcp-ha": "entry-ha",
+                    "mcp-offline": "entry-offline",
+                },
+            },
+        ),
+        SimpleNamespace(
+            create_session=create_session,
+            delete_session=client.delete_session,
+            force_stop=client.force_stop,
+        ),
+        AsyncMock(),
+        AsyncMock(return_value=[SimpleNamespace(id="gpt-4.1")]),
+        access_token_getter=AsyncMock(return_value="not-used"),
+    )
+
+    def chat(conversation_id):
+        class ChatLog:
+            content = []
+            llm_api = None
+
+            async def async_add_delta_content_stream(self, agent_id, stream):
+                async for delta in stream:
+                    yield delta
+
+        log = ChatLog()
+        log.conversation_id = conversation_id
+        return log
+
+    def request(user_id, satellite_id=None):
+        return SimpleNamespace(
+            text="USER_REQUEST_TEXT",
+            satellite_id=satellite_id,
+            as_llm_context=lambda _: SimpleNamespace(
+                context=SimpleNamespace(user_id=user_id)
+            ),
+        )
+
+    def split(payload):
+        system = json.dumps(
+            [
+                m["content"]
+                for m in payload["messages"]
+                if m["role"] in ("system", "developer")
+            ]
+        )
+        user = json.dumps([m for m in payload["messages"] if m["role"] == "user"])
+        names = [tool["function"]["name"] for tool in payload.get("tools", [])]
+        return system, user, names
+
+    try:
+        await client.start()
+        await backend.async_handle_message(
+            "agent", request(None, "assist_satellite.kitchen"), chat("satellite")
+        )
+        system, user, names = split(requests[-1])
+        assert not any(name.startswith("mcp_") for name in names)
+        assert "Remote MCP servers: enabled; unavailable for this request" in system
+        assert "does not have access to remote MCP tools" in system
+        assert "integration notice" not in system + user
+        assert "REMOTE_" not in system + user
+
+        await backend.async_handle_message("agent", request("admin"), chat("admin"))
+        system, user, names = split(requests[-1])
+        assert any(name.startswith("mcp_") for name in names)
+        assert "1 selected MCP server(s) are unavailable right now" in user
+        assert "Actual request:\\nUSER_REQUEST_TEXT" in user
+        assert "integration notice" not in system
+        assert "REMOTE_SERVER_NAME" not in system + user
+        assert "mcp-offline" not in system + user
     finally:
         await backend.async_stop()
         await client.stop()
