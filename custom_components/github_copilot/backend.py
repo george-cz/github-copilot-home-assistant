@@ -953,7 +953,9 @@ class ConversationBackend:
                     != "available"
                 ):
                     raise HomeAssistantError("Satellite history access changed.")
-                if mcp_tools and not await mcp_caller_allowed():
+                # Recheck even with no current tools: a cached session can hold
+                # earlier MCP results.
+                if mcp_status == MCP_ALLOWED and not await mcp_caller_allowed():
                     raise HomeAssistantError("Remote MCP tool access changed.")
                 if mcp_notice:
                     # Fixed integration text with counts only, never server data.

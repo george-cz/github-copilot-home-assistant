@@ -502,8 +502,10 @@ rechecked on every call instead.
   changes before Submit, the form is shown again with `mcp_server_changed` and
   nothing is saved. A form shown again after an error keeps the submitted
   selections that still match the recorded entries.
-- Access: `async_mcp_caller_status` decides per request and again before every
-  call. Administrators are always allowed. Other signed-in users need
+- Access: `async_mcp_caller_status` decides per request, again before every
+  call, and again before a turn is sent whenever the caller was allowed. This
+  holds even when the turn has no MCP tools, because a cached session can hold
+  earlier MCP results. Administrators are always allowed. Other signed-in users need
   `mcp_allow_users`. A request without a user is allowed only from a registered,
   enabled `assist_satellite` whose registry ID is in `mcp_satellites` (the same
   registry check as satellite history). AI Tasks without a user are never
@@ -535,7 +537,9 @@ rechecked on every call instead.
   than `MCP_MAX_SCHEMA_BYTES`, would take the MCP definitions over
   `MCP_MAX_DEFINITION_BYTES`, or is past `MCP_MAX_TOOLS`. At most
   `MCP_MAX_INSPECTED_TOOLS` tools are examined per request, including tools that
-  are later skipped or not allowed, and scanning stops there. These caps bound
+  are later skipped or not allowed, and scanning stops there. The definition
+  budgets, and `MCP_EAGER_DEFINITION_BYTES`, measure each tool as it is sent:
+  the JSON of its SDK name, escaped description, and schema. These caps bound
   local work; `set_tools` sends the definitions to the runtime on every turn.
   Each skipped tool, and each server that reaches the inspection limit, is warned
   about once per entry runtime.
@@ -558,7 +562,9 @@ rechecked on every call instead.
   `mcp_call_failed`) because MCP error text can contain server URLs. For a tool
   that is not read-only, the notice also says that the action may already have
   completed, because a write can succeed before the connection or
-  authentication fails.
+  authentication fails. A write tool whose result HA marks as failed (MCP
+  `isError`) gets the same fixed text in `error_text`, and the truncation
+  envelope keeps it.
 - A top-level `error` key is the failure signal for the backend. Only HA's
   `ToolResult.error` flag sets it (`{"error": "mcp_tool_error", "result": ...}`).
   On HA 2026.10, `CallToolResult` keeps unknown fields, so a successful result
