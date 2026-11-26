@@ -47,6 +47,7 @@ REAUTH_REQUIRED = "The MCP server needs to be signed in again in Home Assistant.
 MAY_HAVE_COMPLETED = (
     " The action may already have completed. Check its result before you repeat it."
 )
+WRITE_FAILED = "The MCP server reported an error." + MAY_HAVE_COMPLETED
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_-]")
 _UNSAFE_LABEL = re.compile(r"[^\w -]")
 _MAX_LABEL = 64
@@ -291,7 +292,10 @@ async def async_mcp_bindings(
                 rejected.add(sdk_name)
                 continue
             description = mcp_description(api, tool, read_only)
-            size = schema_bytes + len(description.encode())
+            # Measure the definition as sent: name, escaped description, schema.
+            size = _json_size(
+                {"name": sdk_name, "description": description, "parameters": parameters}
+            )
             if (
                 schema_bytes > MCP_MAX_SCHEMA_BYTES
                 or definition_bytes + size > MCP_MAX_DEFINITION_BYTES
@@ -352,6 +356,10 @@ def _bounded(data: dict[str, Any]) -> dict[str, Any]:
     envelope: dict[str, Any] = {"status": "incomplete", "reason": "result_too_large"}
     if "error" in data:
         envelope["error"] = "mcp_tool_error"
+        if data.get("error_text") == WRITE_FAILED:
+            envelope["error_text"] = WRITE_FAILED
+            # The notice is already in the envelope; preview only the result.
+            text = json.dumps(data.get("result"), ensure_ascii=False, default=str)
     limit = MCP_MAX_RESULT_BYTES
     while limit > 0:
         result = {**envelope, "preview": text[:limit]}
@@ -411,7 +419,12 @@ async def async_call_mcp_tool(
     # The top-level error key is the failure signal; a remote "error" field on
     # a successful HA 2026.10 result must not turn into one.
     if failed:
-        data = {"error": "mcp_tool_error", "result": data}
+        # A failed write may have been partly or fully applied.
+        data = {
+            "error": "mcp_tool_error",
+            **({} if binding.read_only else {"error_text": WRITE_FAILED}),
+            "result": data,
+        }
     elif "error" in data:
         data = {"result": data}
     return _bounded(data)

@@ -55,6 +55,21 @@ async def ai_setup(tmp_path, monkeypatch):
     await hass.async_stop()
 
 
+# Each tool option must enable the caller-context guard on its own.
+TOOL_MODES = {
+    "device_control": {"enable_device_control": True},
+    "mcp_only": {
+        "enable_device_control": False,
+        "enable_home_assistant_api": False,
+        "mcp_servers": ["mcp-notes"],
+    },
+}
+
+
+def use_tool_mode(ai_setup, mode):
+    ai_setup.entry.options.update(TOOL_MODES[mode])
+
+
 async def test_real_service_helper_returns_result_and_records_last_used(ai_setup):
     result = await ai_setup.ai_task.async_generate_data(
         ai_setup.hass,
@@ -72,9 +87,12 @@ async def test_real_service_helper_returns_result_and_records_last_used(ai_setup
     assert ai_setup.entity.unique_id == "test_ai_task"
 
 
-async def test_interleaved_callers_keep_their_own_context(ai_setup, monkeypatch):
+@pytest.mark.parametrize("mode", TOOL_MODES)
+async def test_interleaved_callers_keep_their_own_context(ai_setup, monkeypatch, mode):
     from homeassistant.components.conversation import ChatLog
     from homeassistant.core import Context
+
+    use_tool_mode(ai_setup, mode)
 
     entered = 0
     both_entered = asyncio.Event()
@@ -139,11 +157,13 @@ async def test_failed_preparation_does_not_leak_context_into_next_call(
     assert request.context.context is None
 
 
-async def test_direct_control_call_without_session_is_rejected(ai_setup):
+@pytest.mark.parametrize("mode", TOOL_MODES)
+async def test_direct_control_call_without_session_is_rejected(ai_setup, mode):
     from homeassistant.components.conversation import ChatLog
     from homeassistant.exceptions import HomeAssistantError
     from homeassistant.helpers.chat_session import current_session
 
+    use_tool_mode(ai_setup, mode)
     token = current_session.set(None)
     try:
         with pytest.raises(HomeAssistantError, match="public task helper"):
@@ -171,12 +191,14 @@ async def test_caller_supplied_api_is_not_executed(ai_setup):
     ai_setup.backend.async_generate_data.assert_not_awaited()
 
 
-async def test_inherited_context_cannot_authorize_direct_child_call(ai_setup):
+@pytest.mark.parametrize("mode", TOOL_MODES)
+async def test_inherited_context_cannot_authorize_direct_child_call(ai_setup, mode):
     from homeassistant.components.conversation import ChatLog
     from homeassistant.core import Context
     from homeassistant.exceptions import HomeAssistantError
     from homeassistant.helpers.chat_session import async_get_chat_session
 
+    use_tool_mode(ai_setup, mode)
     kwargs = (
         {"context": None}
         if "context" in inspect.signature(async_get_chat_session).parameters

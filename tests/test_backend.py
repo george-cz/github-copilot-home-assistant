@@ -4774,3 +4774,74 @@ async def test_unavailable_mcp_server_adds_a_short_notice(setup, monkeypatch):
     assert "mcp-offline" not in prompt
     assert kwargs["display_prompt"] == "Hello"
     await assert_clean(setup)
+
+
+async def test_cached_mcp_history_is_rechecked_without_current_tools(
+    setup, monkeypatch
+):
+    notes = mcp_api(
+        tools=[mcp_tool("read", read_only=True)],
+        return_value=SimpleNamespace(data={"secret": "earlier result"}, error=False),
+    )
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes")
+    await call_tools(setup, [("read", {})], lambda: turn(setup))
+    assert len(setup.backend._sessions) == 1
+
+    # The server unloads, so this turn has no MCP tools. The caller is still an
+    # administrator when the turn starts, and loses access before it is sent.
+    register_apis(setup, monkeypatch)
+    admin = SimpleNamespace(is_admin=True, is_active=True)
+    member = SimpleNamespace(is_admin=False, is_active=True)
+    setup.backend.hass.auth.async_get_user = AsyncMock(side_effect=[admin, member])
+    setup.session.send_and_wait.reset_mock()
+
+    with pytest.raises(setup.error, match="Remote MCP tool access changed"):
+        await turn(setup)
+
+    setup.session.send_and_wait.assert_not_awaited()
+    await assert_clean(setup)
+
+
+async def test_mcp_deferral_measures_serialized_definitions(setup, monkeypatch):
+    # Control characters are escaped as six bytes each in the JSON definition.
+    tools = [mcp_tool(f"t{index}", read_only=True) for index in range(16)]
+    for tool in tools:
+        tool.description = "\x01" * 900
+    notes = mcp_api(tools=tools)
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes")
+
+    observed, _ = await call_tools(setup, [], lambda: turn(setup))
+
+    mcp = [tool for tool in observed if tool.name.startswith("mcp_")]
+    assert len(mcp) == 16
+    assert all(tool.defer == "auto" for tool in mcp)
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("size", [10, 50_000])
+@pytest.mark.parametrize("read_only", [True, False])
+async def test_failed_write_result_warns_it_may_have_completed(
+    setup, monkeypatch, size, read_only
+):
+    notes = mcp_api(
+        tools=[mcp_tool("act", read_only=read_only)],
+        return_value=SimpleNamespace(data={"text": "x" * size}, error=True),
+    )
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes", write=["mcp-notes"])
+
+    _, results = await call_tools(setup, [("act", {})], lambda: turn(setup))
+
+    payload = json.loads(results["act"].text_result_for_llm.split("\n\n", 1)[1])
+    assert results["act"].result_type == "failure"
+    assert payload["error"] == "mcp_tool_error"
+    assert ("may already have completed" in payload.get("error_text", "")) is (
+        not read_only
+    )
+    assert ("status" in payload) is (size > 10)
+    assert json.dumps(payload).count("may already have completed") == (
+        0 if read_only else 1
+    )
+    await assert_clean(setup)
