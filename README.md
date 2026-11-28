@@ -29,6 +29,7 @@ the Home Assistant project.**
 For voice, keep your existing speech-to-text and text-to-speech integrations.
 This integration supplies the conversation agent, not a complete voice pipeline.
 
+<!-- ha-marketplace:exclude-start -->
 ## Installation
 
 Search for **GitHub Copilot** in **Settings > Marketplace** (Home Assistant
@@ -46,6 +47,7 @@ before continuing to setup.
 
 For manual installation, copy `custom_components/github_copilot/` into
 `<config>/custom_components/github_copilot/` and restart Home Assistant.
+<!-- ha-marketplace:exclude-end -->
 
 ## Setup
 
